@@ -1,0 +1,46 @@
+# Secrets ---------------------------------------------------------------
+# .claude/settings.local.json has held an API key in an allowed-command entry.
+.claude/
+.env
+*.key
+
+# Street View imagery ---------------------------------------------------
+# Not committed on purpose: Google Maps Platform terms do not permit
+# redistributing Street View content. direct/data/manifest_*.jsonl carries the
+# pano ids, so `python direct/refetch_images.py` rebuilds the exact benchmark
+# from your own API key.
+streetview/
+
+# Scraped web images and everything derived from them -------------------
+japanese_coin_parkings/
+japanese_not_parkings/
+japanese_not_parkings_rejected/
+japanese_coin_parkings.zip
+dataset/
+
+# The local fine-tuning line -- stopped, not part of this repo -----------
+LoRA/
+adapters/
+hf_dataset/
+review/
+
+# Superseded runs and intermediate test sets ----------------------------
+direct/runs/
+direct/runs_v2/
+direct/testset.jsonl
+direct/testset_streetview.jsonl
+direct/testset_streetview_v2.jsonl
+direct/annotations_streetview_fields.jsonl
+direct/eval_results*.json
+direct/results_streetview.jsonl
+direct/summary_streetview.json
+eval_results*.json
+
+# Python ----------------------------------------------------------------
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+direct/results.jsonl
+direct/summary.json
+direct/build_testset.py
