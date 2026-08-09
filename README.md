@@ -1,8 +1,8 @@
 # street-view-parking-recognition
 
-从 Google 街景图中识别日本投币停车场（コインパーキング）并抽取结构化信息——运营商、最大料金、时段费率。
+Identify Japanese coin parking (コインパーキング) in Google Street View captures and extract structured details — operator, maximum fee, hourly rate.
 
-用 `gemini-3.5-flash` 直接调用，不做微调。**146 张真实街景上 97.9%**，1411 token / 1.7 秒每张，零训练数据。
+Calls `gemini-3.5-flash` directly. No fine-tuning, no training data. **97.9% on a 146-image benchmark of real Street View imagery**, at 1.4 s and ~1,630 tokens per image.
 
 ```json
 {
@@ -14,55 +14,98 @@
 }
 ```
 
-## 快速开始
+All fields are nullable — unreadable means `null`. When `is_coin_parking` is `false`, every other field is `null`.
+
+## Results
+
+146 real Street View images (67 positive / 79 negative; always answering one class would score 54.1%). Run on 2026-08-08, `thinkingBudget=0`, temperature 0, images downscaled to 1280 px.
+
+| variant | accuracy | recall | specificity | F1 | errors |
+|---|---|---|---|---|---|
+| **v0_base** | 97.3% | 94.0% | 100.0% | 0.969 | 4 |
+| v1_rules | **97.9%** | 97.0% | 98.7% | 0.977 | 3 |
+| v2_rules | 96.6% | 94.0% | 98.7% | 0.962 | 5 |
+
+### Time and tokens
+
+| variant | wall clock | mean/img | p50 | p95 | max | total tokens | in / out | mean/img | failed |
+|---|---|---|---|---|---|---|---|---|---|
+| **v0_base** | 254.8 s | 1.74 s | 1.61 s | 2.63 s | 4.28 s | 206,069 | 198,414 / 7,655 | **1,411** | 0 |
+| v1_rules | 212.5 s | 1.45 s | 1.36 s | 1.86 s | 3.93 s | 238,003 | 230,388 / 7,615 | 1,630 | 0 |
+| v2_rules | 213.3 s | 1.45 s | 1.39 s | 1.81 s | 2.32 s | 254,518 | 246,886 / 7,632 | 1,743 | 0 |
+
+Zero failed requests and zero retries across all three runs. Thinking tokens are 0 by design — see [the notes on thinking budget](direct/README.md#pitfalls). Roughly 1,080 of the input tokens per image are the image itself; the rest is the prompt.
+
+No dollar figures are quoted because published rates change; `direct/compare.py --price-in --price-out` will compute cost from rates you supply.
+
+### Which variant to use
+
+**Use `v0_base` — but on cost, not accuracy.**
+
+The three variants are statistically indistinguishable on this benchmark: 4 / 3 / 5 errors, all differences within one or two images. Every time a label was corrected the ranking flipped — three different variants have held first place at some point. `v0_base` is the cheapest (13–19% fewer tokens) and has no extra rules to maintain, and that reason survives the next label correction.
+
+`v1_rules` and `v2_rules` are kept in `prompts.py` as **a recorded negative result**. Each rule was written to fix a failure actually observed in the previous run — the right discipline — and on an 85-image benchmark the ladder looked clean (97.6% → 98.8% → 100%). Doubling the benchmark reversed it. The rules were fitted to five specific errors and, on new data, fix two while breaking three.
+
+### Field extraction
+
+30 Street View positives annotated by hand, scored by **whether a human could read the field at all**. Counting an illegible sign as a model error would measure the annotator's eyesight, not the model.
+
+| field | agree | disagree | missed | unverifiable | verifiable accuracy |
+|---|---|---|---|---|---|
+| operator | 11 | 0 | 0 | 6 | 100% (11/11) |
+| max_fee_yen | 11 | 0 | 0 | 3 | 100% (11/11) |
+| rate | 1 | 0 | 0 | 11 | 100% (1/1) |
+
+*unverifiable* = the model produced a value the annotator could not confirm at 640 px. A perturbation test (re-ask with 5% cropped off each edge; a genuine reading survives, a confabulation drifts) found **10 of 11 stable after semantic normalisation** — the model does read these boards better than the human annotator did. One drifted, implying roughly a 9% confabulation rate.
+
+The sample is small — 11, 11 and 1 verifiable cases. This says *no errors were found*, not *accuracy is 100%*.
+
+## Quick start
 
 ```bash
 pip install -r requirements.txt
 
-# 1. 重建基准图片（仓库不含影像，见下）
+# 1. Rebuild the benchmark images (not redistributed here — see below)
 export GOOGLE_MAPS_API_KEY=...
-python direct/refetch_images.py --dry-run
+python direct/refetch_images.py --dry-run     # count billed requests first
 python direct/refetch_images.py
 
-# 2. 跑评测
+# 2. Run the benchmark
 export GEMINI_API_KEY=...
-python direct/test_gemini.py --model gemini-3.5-flash --prompt-variant v0_base \
-  --testset direct/data/testset_streetview.jsonl \
-  --out direct/results/v0_base_results.jsonl \
-  --summary direct/results/v0_base_summary.json
+python direct/test_gemini.py --model gemini-3.5-flash --prompt-variant v0_base
 
-# 3. 看结果
-python direct/compare.py --runs-dir direct/results
-python direct/score_fields.py
+# 3. Read the results
+python direct/compare.py            # all runs side by side
+python direct/score_fields.py       # field extraction, by legibility
 ```
 
-## 仓库内容
+## What is in this repository
 
-| 路径 | 内容 |
+| Path | Contents |
 |---|---|
-| `direct/*.py` | 评测代码：prompt 契约、变体、主评测、对比、离线重算、字段评分、街景获取 |
-| `direct/data/testset_streetview.jsonl` | **146 张测试集标签，全部人工确认** |
-| `direct/data/annotations_fields.jsonl` | 30 张字段标注，含逐字段可读性标记 |
-| `direct/data/manifest_*.jsonl` | 街景溯源：pano_id、坐标、地址、拍摄年月 |
-| `direct/results/` | 三个 prompt 变体的逐张结果与汇总 |
-| **[`direct/README.md`](direct/README.md)** | **完整说明：结果、方法、已知问题、踩过的坑** |
+| `direct/*.py` | Prompt contract and variants, benchmark runner, comparison, offline rescoring, field scoring, Street View fetching |
+| `direct/data/testset_streetview.jsonl` | **146 benchmark labels, all hand-confirmed** |
+| `direct/data/annotations_fields.jsonl` | 30 field annotations with per-field legibility flags |
+| `direct/data/manifest_*.jsonl` | Provenance: pano id, coordinates, address, capture date |
+| `direct/results/` | Per-image results and summaries for all three variants |
+| **[`direct/README.md`](direct/README.md)** | **Full write-up: method, known issues, pitfalls** |
 
-## 为什么仓库里没有图片
+## Why there are no images here
 
-Google Maps Platform 条款不允许再分发街景影像，所以提交的是**溯源信息**而非图片。`direct/refetch_images.py` 按 `pano_id` 重建完全相同的 146 张基准——用 pano_id 而非坐标是关键，同一坐标的全景会随街景车重新拍摄而变化。
+Google Maps Platform terms do not permit redistributing Street View imagery, so this repository ships **provenance instead of pixels**. `direct/refetch_images.py` reconstructs the identical 146-image benchmark from your own API key.
 
-影像版权归 Google 所有；本仓库仅含派生的标注与元数据。
+It fetches by **pano id, not coordinates** — the panorama at a given location changes when the survey car passes again, while a pano id always resolves to the same photograph. That is what makes the benchmark reproducible.
 
-## 主要结论
+Street View imagery is © Google. This repository contains only derived annotations and metadata.
 
-**分类已经够用**：97.9%，且三个 prompt 变体在此基准上统计不可区分——每修正一处标签排名就翻转一次。按成本选最便宜的 `v0_base`。
+## Honest limitations
 
-**手写 prompt 规则是过拟合**：在 85 张基准上 97.6%→98.8%→100% 的漂亮阶梯，扩到 146 张后完全反转。规则版保留在 `prompts.py` 里作为负面结果的记录。
+**Label noise is now the bottleneck.** Five mislabels have been found and corrected in 146 images (3.4%), all in the negative class, all actually coin parkings. That is the same magnitude as the model's error count, which is why the variant ranking is unstable.
 
-**标注质量才是瓶颈**：146 张里已确认 5 处错标（3.4%），与模型误差同量级。审阅分辨率直接决定标签质量——360px 缩略图漏掉的错标，560px 下一眼可见。
+**Review resolution determines label quality.** Mislabels missed on 360 px contact sheets were obvious at 560 px. Re-reviewing 60 negatives at the higher resolution surfaced 19 contaminated images (32%) in one pass.
 
-细节见 [`direct/README.md`](direct/README.md)。
+**"The model disagrees with me" is not a reliable review trigger.** It fails exactly when model and annotator make the same mistake — both overlooking a small distant sign. A separate high-recall screener asking a *different* question ("is any fee equipment anywhere in this frame?") has uncorrelated failure modes and surfaced one further mislabel.
 
-## 状态
+## Status
 
-评测部分完成。**尚无「输入区域 → 输出该区域停车场数据」的生产管线**，现有代码全部需要预先标注好的测试集。
+The evaluation work is complete. **There is no production pipeline yet** — every script here needs a pre-labelled test set. Turning this into "given an area, return its parking data" is the remaining work.

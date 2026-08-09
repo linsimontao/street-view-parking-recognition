@@ -1,10 +1,8 @@
-# 街景コインパーキング識別 — Gemini API 直调
+# Street View coin parking recognition — Gemini direct call
 
-从 Google 街景图中识别日本投币停车场（コインパーキング）并抽取结构化信息。不做微调，直接调用 `gemini-3.5-flash`。
+Identify Japanese coin parking (コインパーキング) in Google Street View captures and extract structured details. No fine-tuning; `gemini-3.5-flash` is called directly.
 
-**146 张真实街景上 97.9%**，1411 token / 1.7 秒每张，零训练数据。
-
-## 输出 schema
+## Output schema
 
 ```json
 {
@@ -16,109 +14,178 @@
 }
 ```
 
-字段全部 nullable，读不到就填 `null`；`is_coin_parking` 为 `false` 时其余字段一律 `null`。
+All fields nullable — unreadable means `null`. When `is_coin_parking` is `false`, every other field is `null`. `view_type` ∈ `lot_wide` | `sign_closeup` | `machine_closeup`.
 
-## 结果
+## Benchmark
 
-146 张真实街景（正 67 / 负 79，全判一类的下限 54.1%）：
+`data/testset_streetview.jsonl` — 146 real Street View captures, 67 positive / 79 negative. Always answering one class scores 54.1%.
 
-| variant | accuracy | 正类召回 | 负类特異度 | F1 | 错误数 | 平均tok | 平均秒 | p95秒 |
+Positives came from a Places search for コインパーキング / 時間貸駐車場; negatives from 月極駐車場 (monthly parking) — the discriminative case, since a monthly lot has the same asphalt, the same painted bays and the same P sign, and differs only by the absence of a meter or fee board.
+
+Every label is hand-confirmed. The five corrected labels carry a `note` field recording what the evidence was.
+
+## Results
+
+Run 2026-08-08 · `gemini-3.5-flash` · `thinkingBudget=0` · temperature 0 · images downscaled to 1280 px.
+
+### Accuracy
+
+| variant | accuracy | recall | specificity | F1 | TP/FP/TN/FN | errors |
+|---|---|---|---|---|---|---|
+| **v0_base** | 97.3% | 94.0% | 100.0% | 0.969 | 63/0/79/4 | 4 |
+| v1_rules | **97.9%** | 97.0% | 98.7% | 0.977 | 65/1/78/2 | 3 |
+| v2_rules | 96.6% | 94.0% | 98.7% | 0.962 | 63/1/78/4 | 5 |
+
+### Time
+
+| variant | wall clock | sum of requests | mean | p50 | p95 | max | failed | retried |
 |---|---|---|---|---|---|---|---|---|
-| **v0_base** | 97.3% | 94.0% | 100.0% | 0.969 | 4 | **1411** | 1.74 | 2.63 |
-| v1_rules | 97.9% | 97.0% | 98.7% | 0.977 | 3 | 1630 | 1.45 | 1.86 |
-| v2_rules | 96.6% | 94.0% | 98.7% | 0.962 | 5 | 1743 | 1.45 | 1.81 |
+| **v0_base** | 254.8 s | 253.5 s | 1.736 s | 1.606 s | 2.629 s | 4.276 s | 0 | 0 |
+| v1_rules | 212.5 s | 211.2 s | 1.447 s | 1.361 s | 1.856 s | 3.929 s | 0 | 0 |
+| v2_rules | 213.3 s | 212.0 s | 1.452 s | 1.388 s | 1.813 s | 2.320 s | 0 | 0 |
 
-**推荐用 `v0_base`，但理由不是准确率。**
+Requests are issued sequentially, so wall clock ≈ sum of request times. The v0 run was slower per image than v1/v2 despite a shorter prompt; with n=146 and no retries this is server-side variance, not a property of the prompt.
 
-三个变体在这个基准上无法区分：错误数 4/3/5，差异全在 1–2 张内，而**每修正一处标签排名就翻转一次**（先后出现过三个不同的第一名）。所谓"差异"完全被标注噪声吞没。既然等价，就按成本选——`v0_base` 最便宜（省 13–19% token）且没有额外规则要维护，这个理由不会被下次标签修正推翻。
+### Tokens
 
-`v1_rules` / `v2_rules` 保留在 `prompts.py` 里作为**负面结果的记录**：它们是从 85 张基准上的具体错误反推出来的规则，在那批数据上看着漂亮（97.6%→98.8%→100%），扩到 146 张后就反转了。典型的过拟合。
-
-### 字段抽取
-
-30 张街景人工标注，按**人工可读性分档**评分（把标注者读不出的记成模型错，测的是视力不是模型）：
-
-| 字段 | 一致 | 不一致 | 漏读 | 无法验证 | 可验证准确率 |
+| variant | input | output | thinking | total | mean per image |
 |---|---|---|---|---|---|
-| operator | 11 | 0 | 0 | 6 | 100% (11/11) |
-| max_fee_yen | 11 | 0 | 0 | 3 | 100% (11/11) |
-| rate | 1 | 0 | 0 | 11 | 100% (1/1) |
+| **v0_base** | 198,414 | 7,655 | 0 | 206,069 | **1,411.4** |
+| v1_rules | 230,388 | 7,615 | 0 | 238,003 | 1,630.2 |
+| v2_rules | 246,886 | 7,632 | 0 | 254,518 | 1,743.3 |
 
-「无法验证」是模型给了值而人工在 640px 下读不出。用**裁边 5% 的扰动测试**判别（真实读取应存活，编造值会漂移）：语义归一后 10/11 稳定，说明多数确实读出来了；1 张漂移，约 9% 编造率。
+About 1,080 input tokens per image are the image itself (1280 px, Qwen-style patching); the remainder is the prompt, which is what the rule variants inflate. Output holds steady near 52 tokens — the JSON object — confirming the extra input buys longer instructions, not longer answers.
 
-样本量很小，可验证的只有 11/11/1 张。**只能说「未发现错误」，不能说「准确率 100%」。**
+Costs in currency are deliberately not quoted, since published rates change. `compare.py --price-in X --price-out Y` computes them from rates you supply.
 
-## 已知问题
+### Which variant to use
 
-- **`view_type` 应删除**：街景上 63/65 都是 `lot_wide`，零信息量。它是为宣传照设计的（广角/看板特写/精算机特写），在街景域不成立。
-- **`rate` 格式不稳定**：同一块看板会输出 `30分/200円`、`オールタイム 30分 200円`、`200円/30分` 三种写法。建议拆成 `rate_minutes` / `rate_yen` 两个整数字段。`score_fields.py` 已用语义归一（提取「分钟数+日元」对）绕开这一点。
-- **标注噪声约 3.4%**：146 张里已确认 5 处错标，全在负样本、全是「实为 coin parking」。基准分辨率已被标注质量卡死。
+**Use `v0_base` — chosen on cost, not accuracy.**
 
-## 数据
+The three variants are statistically indistinguishable here: 4 / 3 / 5 errors, every difference within one or two images. Each label correction flipped the ranking, and all three have held first place at some point:
 
-`data/testset_streetview.jsonl` —— 146 张的标签，**全部人工确认**。5 处修正带 `note` 字段说明依据。
+| variant | after correcting sv_038 | after correcting sv_008 |
+|---|---|---|
+| v0_base | 97.9% | 97.3% |
+| v1_rules | 97.3% | **97.9%** |
+| v2_rules | 97.3% | 96.6% |
 
-`data/annotations_fields.jsonl` —— 30 张的字段标注，含 `operator_legible` / `max_fee_legible` / `rate_legible` 三个可读性标记。
+Since they are equivalent, cost decides: `v0_base` is 13–19% cheaper in tokens and has no extra rules to maintain. That reason will not be overturned by the next label correction.
 
-`data/manifest_*.jsonl` —— 每张的溯源：`pano_id`、坐标、地址、拍摄年月、全景与登记坐标的距离。
+### The rule variants are a recorded negative result
 
-**图片本身不在仓库里。** Google Maps Platform 条款不允许再分发街景影像，所以提交的是溯源信息。用你自己的 key 即可重建完全相同的基准：
+`v1_rules` and `v2_rules` remain in `prompts.py` deliberately. Each rule was written to fix a failure actually observed in the previous run — the right discipline — and on the earlier 85-image benchmark the ladder looked convincing:
+
+| variant | 85 images | 146 images |
+|---|---|---|
+| v0_base | 97.6% | 97.3% |
+| v1_rules | 98.8% | **97.9%** |
+| v2_rules | **100.0%** | 96.6% |
+
+- **v1** fixed two misses (a parking entrance occupying a corner of the frame; a backlit, motion-blurred machine) by stating that equipment counts even when peripheral, distant or backlit. Recall rose to 100% on the small set.
+- **v2** fixed v1's false positive (vending machines mistaken for a payment machine) by naming what is *not* fee equipment and defaulting to `false` when unsure. That reached 100% on the small set.
+
+On the doubled benchmark both rules backfired: v1's permissiveness produced a false positive on an apartment piloti parking, and v2's "default to false" suppressed a real coin parking whose fee board was small. Rules fitted to five specific errors fix two and break three on new data. **The plain prompt is better calibrated than hand-written rules.**
+
+Few-shot was not attempted for the same reason: if written rules overfit, examples drawn from the same error pool will overfit harder, and at 0.68 points per image there is no power to measure the difference.
+
+## Field extraction
+
+30 Street View positives annotated by hand. Each field is scored by **whether the annotator could read it at all**, because at Street View resolution the small print on a 料金看板 is often physically present but illegible — counting those as model errors would measure eyesight, not the model.
+
+| bucket | meaning |
+|---|---|
+| agree | annotator read a value, model matches |
+| disagree | annotator read a value, model differs — the only real errors |
+| missed | annotator read a value, model returned null |
+| unverifiable | annotator could not read it, model produced a value |
+| both_null | annotator could not read it, model returned null too |
+
+| field | agree | disagree | missed | unverifiable | both_null | verifiable accuracy |
+|---|---|---|---|---|---|---|
+| operator | 11 | 0 | 0 | 6 | 13 | 100% (11/11) |
+| max_fee_yen | 11 | 0 | 0 | 3 | 16 | 100% (11/11) |
+| rate | 1 | 0 | 0 | 11 | 18 | 100% (1/1) |
+
+Nothing the annotator could read was answered wrongly or skipped.
+
+**Resolving the unverifiable cases.** The model sees the same 640 px the annotator does, so a value the annotator cannot confirm is either superior low-resolution OCR or confabulation. Repeating the call is not a discriminator — at temperature 0 a confabulation reproduces just as stably. Perturbing the input is: re-asked with 5% cropped off each edge, a genuine reading survives while a value anchored on spurious features drifts.
+
+Of 11 unverifiable `rate` values, **10 were stable** after semantic normalisation and one drifted (`60分/100円` → `40分/200円`), implying roughly a 9% confabulation rate. Two of the three raw-string changes were formatting only — `30分/200円` vs `オールタイム 30分 200円` vs `200円/30分` — which is why `score_fields.py` normalises a rate to a `(minutes, yen)` pair before comparing.
+
+The sample is small: 11, 11 and 1 verifiable cases. This supports *no errors were found*, not *accuracy is 100%*.
+
+## Known issues
+
+**`view_type` should be dropped.** 63 of 65 Street View positives return `lot_wide`. The field distinguishes wide shot / sign close-up / machine close-up, which made sense for promotional photography but not for imagery shot from a passing car. It carries no information in the deployment domain.
+
+**`rate` format is unstable.** The same board yields `30分/200円`, `オールタイム 30分 200円` or `200円/30分` under slight input changes. Splitting it into integer `rate_minutes` / `rate_yen` fields would remove the parsing burden from consumers.
+
+**Label noise is the bottleneck.** Five mislabels found in 146 images (3.4%), all in the negative class, all actually coin parkings — the same magnitude as the model's error count. This is why the variant ranking is unstable and why further prompt tuning cannot be measured here.
+
+## Data
+
+`data/testset_streetview.jsonl` — 146 labels, all hand-confirmed. Corrected entries carry `note`.
+
+`data/annotations_fields.jsonl` — 30 field annotations with `operator_legible` / `max_fee_legible` / `rate_legible` flags.
+
+`data/manifest_*.jsonl` — provenance per image: `pano_id`, coordinates, address, capture date, distance from the panorama to the registered coordinates.
+
+**The images themselves are not in this repository.** Google Maps Platform terms do not permit redistributing Street View content, so what is committed is provenance. Rebuild the identical benchmark with your own key:
 
 ```bash
 export GOOGLE_MAPS_API_KEY=...
-python direct/refetch_images.py --dry-run   # 先看要取多少张
+python direct/refetch_images.py --dry-run   # how many billed requests
 python direct/refetch_images.py
 ```
 
-按 `pano_id` 而非坐标取图——同一坐标的全景会随街景车重新拍摄而变化，`pano_id` 则永远对应同一张照片。这是可复现的关键。
+Fetching is by `pano_id`, not coordinates: the panorama at a location changes when the survey car passes again, while a pano id always resolves to the same photograph.
 
-## 运行
+## Running
 
 ```bash
 pip install -r requirements.txt
-export GEMINI_API_KEY=...              # 只从环境变量读，不要写进文件
+export GEMINI_API_KEY=...              # read from the environment only; never commit it
 
-python direct/test_gemini.py --list-models     # 先确认 key 能用哪些模型
-python direct/test_gemini.py --model gemini-3.5-flash --prompt-variant v0_base \
-  --testset direct/data/testset_streetview.jsonl \
-  --out direct/results/v0_base_results.jsonl \
-  --summary direct/results/v0_base_summary.json
+python direct/test_gemini.py --list-models      # what this key can reach
+python direct/test_gemini.py --model gemini-3.5-flash --prompt-variant v0_base
 
-python direct/compare.py --runs-dir direct/results                    # 所有 run 并列
-python direct/compare.py --runs-dir direct/results --diff v0_base v1_rules  # 哪些图改判了
-python direct/score_fields.py                                         # 字段抽取分档评分
-python direct/rescore.py --runs-dir direct/results                    # 标签修正后离线重算
+python direct/compare.py                            # all runs side by side
+python direct/compare.py --diff v0_base v1_rules    # which images changed verdict
+python direct/score_fields.py                       # field extraction by legibility
+python direct/rescore.py                            # re-score offline after a label fix
 ```
 
-脚本会先校验 `--model` 是否在该 key 可访问的列表里，不在就列出可用的 flash 型号并退出——省得 146 次请求全废了才发现模型名写错。
+`test_gemini.py` validates `--model` against the models the key can actually reach and exits with the available flash models if it cannot — rather than failing 146 requests before revealing a typo.
 
-`results/*_results.jsonl` 每张记录：预测 JSON、真值、是否正确、耗时、prompt/output/thinking/total token、`finishReason`、重试次数、错误原因。
+`results/*_results.jsonl` records per image: prediction JSON, ground truth, correctness, elapsed seconds, prompt / output / thinking / total tokens, `finishReason`, attempt count, and error reason.
 
-## 文件
+`--diff` matters more than the accuracy column: an accuracy that moved because two errors swapped places is not progress.
 
-| 文件 | 作用 |
+## Files
+
+| File | Purpose |
 |---|---|
-| `prompt.py` | prompt 契约（system / user / 目标 JSON 序列化） |
-| `prompts.py` | v0/v1/v2 变体，注释写明每条规则对应哪次实测错误 |
-| `image_utils.py` | 1280px 预缩放 + 项目根相对路径解析 |
-| `test_gemini.py` | 主评测，逐张记录 8 项指标 |
-| `compare.py` | 多 run 并列 + `--diff` 列出改判的具体图片 |
-| `rescore.py` | 标签修正后离线重算，不烧 API |
-| `score_fields.py` | 字段评分，区分「模型错」与「人工无法验证」 |
-| `fetch_streetview.py` | 街景获取：Places 搜坐标 → 免费 metadata 筛全景 → 付费取图 |
-| `refetch_images.py` | 按 manifest 的 pano_id 重建基准 |
-| `build_testset.py` | 从本地图库抽样构建测试集清单 |
+| `prompt.py` | Prompt contract — system, user, target JSON serialisation |
+| `prompts.py` | v0/v1/v2 variants; comments record which observed error each rule addresses |
+| `image_utils.py` | 1280 px downscale, project-root-relative path resolution |
+| `test_gemini.py` | Benchmark runner; 8 metrics per image |
+| `compare.py` | Multi-run table plus `--diff` |
+| `rescore.py` | Re-score stored predictions against corrected labels without re-calling the API |
+| `score_fields.py` | Field scoring separating "wrong" from "unverifiable" |
+| `fetch_streetview.py` | Places search → free metadata check → billed image fetch |
+| `refetch_images.py` | Rebuild the benchmark from manifest pano ids |
 
-## 踩过的坑
+## Pitfalls
 
-**gemini-3.5-flash 是 thinking 模型，thinking token 从 `maxOutputTokens` 里扣。** `maxOutputTokens=256` 时 246 个被推理吃掉，只剩 6 个吐出截断的 `"Here is the"`，`finishReason=MAX_TOKENS`。实测 `thinkingBudget=0` 与默认 thinking 输出逐字相同，但快一倍多、省 26% token，故默认关闭。
+**gemini-3.5-flash is a thinking model, and thinking tokens come out of `maxOutputTokens`.** At 256 the model spent 246 on reasoning and emitted a truncated `"Here is the"` with `finishReason=MAX_TOKENS`. `thinkingBudget=0` returns byte-identical answers on this task at less than half the tokens and latency (1.5 s / 1,406 tok vs 3.5 s / 1,903 tok), so it is the default here.
 
-**模型的花括号会多也会少。** 有时在完整对象后多吐一个 `}`，有时漏掉结尾的 `}`（`finishReason` 仍是 `STOP`）。用 `rfind('}')` 截取两种情况都会解析失败——**本可正确的答案被记成失败，从而低估准确率**。改为从第一个 `{` 起做括号配对扫描，并在对象完整仅缺尾括号时补全；真正断在字符串中途的仍判失败，不猜测。
+**The model emits both too many and too few closing braces.** Sometimes a stray `}` follows a complete object; sometimes the closing `}` is missing outright while `finishReason` is still `STOP`. Slicing with `rfind('}')` fails on both, turning correct answers into recorded failures and understating accuracy. The parser counts braces from the first `{`, stops at the first balanced object, and repairs a missing closer when the object is otherwise intact — but still fails a string truncated mid-value rather than guessing.
 
-**审阅分辨率决定标签质量。** 用 360px 缩略图筛选时漏掉 3 处错标；改 560px 后当场在 60 张负样本里揪出 19 张污染（32%）——「月極駐車場」坐标附近拍到 coin parking 是高频现象。
+**Review resolution determines label quality.** Three mislabels survived review on 360 px contact sheets. Re-reviewing 60 negatives at 560 px surfaced 19 contaminated images (32%) in a single pass — a coin parking captured near a 月極駐車場 coordinate is common.
 
-**「模型不同意」不是可靠的复核触发器。** 当模型和标注者犯同样的错误（都漏看远处的小看板）时完全失效。补救办法是用一个**问不同问题的高召回筛查器**（「画面任何位置有没有计费设备」），其失效模式与分类器不相关。80 张负样本里标出 17 张可疑，人工复核后又确认了 1 处错标。
+**"The model disagrees with me" is not a reliable review trigger.** It fails precisely when model and annotator make the same mistake, such as both overlooking a small sign in the background. The fix is a separate high-recall screener asking a *different* question — "is any fee equipment anywhere in this frame?" — whose failure modes are uncorrelated with the classifier's. Run over 80 negatives it flagged 17 for review, and human confirmation found one further mislabel.
 
-## 免责
+## Licence and attribution
 
-街景影像版权归 Google 所有，本仓库不含影像，仅含派生的标注与元数据。使用 `fetch_streetview.py` / `refetch_images.py` 需自备 API key 并遵守 Google Maps Platform 条款。
+Street View imagery is © Google and is **not** included in this repository; only derived annotations and metadata are. Using `fetch_streetview.py` or `refetch_images.py` requires your own API key and compliance with Google Maps Platform terms.
