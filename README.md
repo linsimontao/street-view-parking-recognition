@@ -98,6 +98,41 @@ It fetches by **pano id, not coordinates** — the panorama at a given location 
 
 Street View imagery is © Google. This repository contains only derived annotations and metadata.
 
+## Alternatives tried
+
+Zero-shot prompting is where this ended up, not where it started. Two other routes were explored; both are recorded here because the reasoning is more useful than the conclusion.
+
+### Fine-tuning (LoRA) — tried, and it won on the wrong benchmark
+
+`mlx-community/Qwen3-VL-4B-Instruct-8bit`, LoRA rank 8 / alpha 16, trained on **20 hand-annotated images** (10 positive, 10 negative) with MLX on an Apple M5.
+
+Measured on **224 web promotional photographs — not the Street View benchmark above, and not comparable to it**:
+
+| metric | base model | + LoRA |
+|---|---|---|
+| accuracy | 91.5% | **98.2%** |
+| recall | 84.6% | 99.1% |
+| precision | 99.0% | 97.5% |
+| hard-negative rejection | 100.0% | 92.3% |
+| null-rule compliance | 82.3% | 100.0% |
+
+It was abandoned for two reasons:
+
+**The benchmark was the wrong domain.** Those photographs are marketing shots — clean framing, fee board square to the lens, good light. Real Street View is oblique, distant, motion-blurred and occluded. Gemini zero-shot outscored this adapter on actual Street View while requiring no labelled data at all.
+
+**What it bought was conformance, not perception.** The base model already emitted schema-valid JSON on 100% of images zero-shot. The gains were behavioural — obeying the null rule, hallucinating fewer operator names — not new visual capability. With 20 training images that is the ceiling, and it was reached.
+
+### Few-shot — not attempted, deliberately
+
+Four reasons, in descending order of how decisive they are:
+
+1. **The remaining errors are perceptual, not conventional.** `v0_base`'s four misses are a parking entrance occupying a frame corner and a backlit, motion-blurred machine. Few-shot teaches conventions; it cannot make an occluded sign visible.
+2. **The isomorphic experiment already failed.** The prompt-rule variants were built by exactly this method — fit to observed errors — and overfit (see above). Few-shot regularises *less* than written rules, so it would overfit harder.
+3. **There is no power to measure it.** One image is 0.68 points at n=146, while label noise is already 3.4%. Any measured gain would be indistinguishable from noise.
+4. **It costs 3.4× per request.** An image-bearing example is ~1,080 tokens; three shots push the prompt from ~1,359 to ~4,755 tokens — for a gain that, by point 3, cannot be observed.
+
+Full detail on all three routes: [`direct/README.md`](direct/README.md#alternatives-tried-and-rejected).
+
 ## Honest limitations
 
 **Label noise is now the bottleneck.** Five mislabels have been found and corrected in 146 images (3.4%), all in the negative class, all actually coin parkings. That is the same magnitude as the model's error count, which is why the variant ranking is unstable.

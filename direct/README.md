@@ -72,9 +72,15 @@ The three variants are statistically indistinguishable here: 4 / 3 / 5 errors, e
 
 Since they are equivalent, cost decides: `v0_base` is 13–19% cheaper in tokens and has no extra rules to maintain. That reason will not be overturned by the next label correction.
 
-### The rule variants are a recorded negative result
+Why the rule variants exist at all, and why few-shot and fine-tuning were rejected, is in [Alternatives tried and rejected](#alternatives-tried-and-rejected).
 
-`v1_rules` and `v2_rules` remain in `prompts.py` deliberately. Each rule was written to fix a failure actually observed in the previous run — the right discipline — and on the earlier 85-image benchmark the ladder looked convincing:
+## Alternatives tried and rejected
+
+Zero-shot prompting is where this ended up, not where it started. Three routes were explored. All are recorded here — the reasoning outlasts the conclusion, and two of them are negative results worth not repeating.
+
+### 1. Prompt rules (`v1_rules`, `v2_rules`) — overfitted
+
+Both variants remain in `prompts.py` deliberately. Each rule was written to fix a failure actually observed in the previous run — the right discipline — and on the earlier 85-image benchmark the ladder looked convincing:
 
 | variant | 85 images | 146 images |
 |---|---|---|
@@ -87,7 +93,59 @@ Since they are equivalent, cost decides: `v0_base` is 13–19% cheaper in tokens
 
 On the doubled benchmark both rules backfired: v1's permissiveness produced a false positive on an apartment piloti parking, and v2's "default to false" suppressed a real coin parking whose fee board was small. Rules fitted to five specific errors fix two and break three on new data. **The plain prompt is better calibrated than hand-written rules.**
 
-Few-shot was not attempted for the same reason: if written rules overfit, examples drawn from the same error pool will overfit harder, and at 0.68 points per image there is no power to measure the difference.
+### 2. Few-shot — not attempted, deliberately
+
+**The remaining errors are perceptual, not conventional.** `v0_base`'s four misses are a parking entrance occupying a frame corner and a backlit, motion-blurred machine. Few-shot teaches conventions — output shape, where a boundary lies. It cannot make an occluded sign visible.
+
+**The isomorphic experiment already failed.** Few-shot and the rule variants are the same procedure: fit to observed errors, hope it generalises. Section 1 is what that produced. Examples regularise *less* than written rules — a rule is at least an abstraction, an example carries every incidental feature of the image it came from — so few-shot would overfit harder from the same error pool.
+
+**There is no power to measure it.** One image is 0.68 points at n=146, and label noise is 3.4% (five mislabels found so far). Any gain small enough to be plausible is smaller than the noise it would have to be distinguished from.
+
+**It costs 3.4× per request.** Input is 1,359 tokens per image, of which roughly 1,080 is the image itself and ~279 the prompt; each answer is ~52 tokens. An image-bearing example therefore costs ~1,130 tokens, so three shots push the prompt to ~4,755 and the request total to ~4,800 against the current 1,411 — for a gain that, by the previous point, cannot be observed.
+
+### 3. Fine-tuning (LoRA) — tried, and it won on the wrong benchmark
+
+**Setup.** `mlx-community/Qwen3-VL-4B-Instruct-8bit`, LoRA rank 8 / alpha 16, `--train-on-completions`, vision tower frozen. Training data was **20 hand-annotated images** — 10 coin parking, 10 monthly parking — on an Apple M5 (24 GB) with MLX.
+
+**Training did not finish as planned.** Eight epochs were requested; the run hit a Metal out-of-memory at roughly step 141 of 160. The iteration-120 checkpoint (six epochs, loss 0.086) was already converged and is what the numbers below use.
+
+**Results on 224 web promotional photographs.** This is a different corpus from the 146-image Street View benchmark in this README, and the two sets of numbers are **not comparable**:
+
+| metric | base model | + LoRA |
+|---|---|---|
+| accuracy | 91.5% | **98.2%** |
+| recall | 84.6% | 99.1% |
+| precision | 99.0% | 97.5% |
+| hard-negative rejection | 100.0% | 92.3% |
+| null-rule compliance | 82.3% | 100.0% |
+| JSON parse rate | 100.0% | 100.0% |
+
+Confusion moved from (99 TP, 1 FP, 106 TN, 18 FN) to (116, 3, 104, 1) — 18 missed parkings down to one, at the cost of two extra false positives.
+
+**Field extraction on a 40-image annotated subset of the same corpus:**
+
+| field | base model | + LoRA |
+|---|---|---|
+| operator | 70.0% | 80.0% |
+| max_fee_yen | 80.0% | 75.0% |
+| rate | 55.0% | 70.0% |
+| view_type | 35.0% | 100.0% |
+
+**`view_type`'s +65 points should be discounted heavily.** Seventeen of the 20 evaluation positives were `lot_wide`, so answering `lot_wide` unconditionally scores 85%. The base model scored 35% because it used its own vocabulary; the adapter's 100% is having learned the annotation convention, not having gained visual capability. `max_fee_yen` moving down 5 points is one image out of 20 — noise.
+
+**Why it was abandoned.**
+
+*The benchmark was the wrong domain.* Those 224 images are marketing photography: clean framing, fee board square to the lens, good light. Street View is oblique, distant, motion-blurred and occluded. Gemini zero-shot outscored this adapter on real Street View while requiring no labelled data at all. The adapter's 98.2% was a real win on a corpus that does not represent deployment.
+
+*What it bought was conformance, not perception.* The base model already emitted schema-valid JSON on 100% of images zero-shot, so there was no format headroom to win. The gains were behavioural — obeying the null rule, hallucinating fewer operator names, recovering 17 missed parkings. With 20 training images that is the ceiling, and it was reached. Reading the small print on a distant 料金看板 was not learned and would not be, at that data scale.
+
+**Pitfalls, for anyone reproducing this on MLX.** These cost real time:
+
+- **`--grad-checkpoint` is not optional.** Without it the trainer reported `Iter 1: Train loss 0.00000000` and `Trained Tokens 1065353215` — a value near 2³⁰, i.e. garbage. That code path reads unevaluated arrays and the loss is fiction. With the flag, loss and token accounting behave (6.30 → 0.086).
+- **`--image-resize-shape` is silently ignored for `qwen3_vl`.** The model is in mlx-vlm's `NATIVE_PREPROCESS_MODELS`, and that branch never receives `resize_shape`. Downscaling has to happen when the dataset is built, which also guarantees training and evaluation see identical pixels.
+- **The dataset must be parquet.** `mlx_vlm/lora.py` calls `datasets.load_dataset()`, which cannot read a `save_to_disk()` directory. Parquet round-trips the `Image` feature correctly.
+
+**The fine-tuning code is not in this repository.** That line is stopped; the adapter weights are 66 MB per checkpoint and the training images were scraped from image search, with the copyright questions that implies.
 
 ## Field extraction
 
